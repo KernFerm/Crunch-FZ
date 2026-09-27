@@ -12,7 +12,7 @@ Upstream does not remove repeated characters from a supplied charset. Repeated c
 
 `crunch_core.c` ports the compatible ASCII generation loop into a platform-neutral, allocation-free core. It retains the original set order and odometer order while replacing process globals, `wchar_t`, standard output, and desktop file handling with an explicit configuration, preflight plan, and streaming callback.
 
-The Flipper worker sends one completed line at a time directly to the official storage API. It never retains the complete wordlist. A mutex protects the measured line/byte counters read by the GUI. Back sets a cancellation flag; the core checks it before every line, and the worker closes the output before showing its completion state.
+The Flipper worker streams completed lines through a bounded 1 KiB buffer into a transactional temporary file. It never retains the complete wordlist. A mutex protects the measured line/byte counters read by the GUI. Back sets a cancellation flag; the core checks it before every line, and the worker discards temporary output before showing its completion state.
 
 Preflight uses checked unsigned 64-bit multiplication and addition for every set product, line sum, and newline-inclusive byte total. A configuration is rejected if either exact value cannot be represented. Generation never starts from a wrapped or approximate count.
 
@@ -20,9 +20,9 @@ Preflight uses checked unsigned 64-bit multiplication and addition for every set
 
 - Word and pattern length: 1 through 32 printable ASCII bytes.
 - Custom charset: 1 through 80 printable ASCII bytes.
-- Output directory: absolute `/ext` path, up to 127 bytes, without traversal.
+- Output directory: one folder name beneath `/ext`, up to 127 bytes, without separators or traversal.
 - Output filename: up to 63 printable bytes, excluding FAT-invalid separators and metacharacters.
-- RAM: fixed configuration, plan, one 33-byte output line, GUI state, and storage objects.
+- RAM: fixed configuration, plan, one 33-byte output line, a checked 1 KiB write buffer, GUI state, and storage objects.
 - Results are newline-delimited ASCII and include one byte per newline in preflight/output counters.
 
 Unicode generation, compression, permutation input, file splitting, inversion, start/end blocks, session resume, and duplicate-run suppression depend on substantially different upstream paths or additional UI/state. They are mapped explicitly in [FEATURE_MATRIX.md](FEATURE_MATRIX.md) and are not silently imitated.

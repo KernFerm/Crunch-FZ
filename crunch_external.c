@@ -176,9 +176,9 @@ bool crunch_external_start(CrunchExternal* external, uint32_t baudrate) {
         crunch_external_stop(external);
         return false;
     }
+    furi_hal_serial_init(external->serial, baudrate);
     furi_thread_start(external->worker);
     external->worker_started = true;
-    furi_hal_serial_init(external->serial, baudrate);
     furi_hal_serial_async_rx_start(external->serial, crunch_external_irq, external, true);
     crunch_external_send(external, "CWF1 HELLO\n");
     crunch_external_send(external, "CWF1 STATUS\n");

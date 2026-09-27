@@ -71,6 +71,39 @@ class CompanionTests(unittest.TestCase):
             self.assertEqual(bridge.lines, 3)
             self.assertEqual(bridge.bytes, 7)
 
+    def test_missing_required_output_is_reported_without_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with patch.object(BRIDGE.shutil, "which", return_value=None):
+                bridge = BRIDGE.Bridge("/dev/serial0", 115200, output)
+            bridge.output_path = output / "removed.txt"
+            self.assertEqual(bridge._measure(require_file=True), "OUTPUT_MISSING")
+
+    def test_measurement_filesystem_error_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with patch.object(BRIDGE.shutil, "which", return_value=None):
+                bridge = BRIDGE.Bridge("/dev/serial0", 115200, output)
+            bridge.output_path = output / "wordlist.txt"
+            with patch.object(Path, "is_file", side_effect=OSError("media removed")):
+                self.assertEqual(bridge._measure(), "MEASURE_media_removed")
+
+    def test_process_stderr_is_preserved_as_protocol_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with patch.object(BRIDGE.shutil, "which", return_value=None):
+                bridge = BRIDGE.Bridge("/dev/serial0", 115200, output)
+            target = output / "failed.txt"
+            bridge.output_path = target
+            bridge.started = BRIDGE.time.monotonic()
+            bridge.generation_worker(
+                [sys.executable, "-c", "import sys; print('disk full', file=sys.stderr); sys.exit(7)"],
+                target,
+            )
+            self.assertEqual(bridge.state, "ERROR")
+            self.assertEqual(bridge.exit_code, 7)
+            self.assertEqual(bridge.error, "disk_full")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,13 +8,14 @@ import argparse
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 import serial
 
-BRIDGE_VERSION = "1.0.0"
+BRIDGE_VERSION = "1.0.1"
 PROTOCOL_VERSION = 1
 MAX_LINE = 512
 DATA_ROOT = Path("/var/lib/crunch-fz")
@@ -33,6 +34,11 @@ PRESETS = (
 def token(value: object, limit: int) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:+-]", "_", str(value))
     return (cleaned or "-")[:limit]
+
+
+def os_error_token(prefix: str, error: OSError) -> str:
+    detail = error.strerror or str(error) or error.__class__.__name__
+    return token(f"{prefix}_{detail}", 63)
 
 
 def decode_hex(value: str, maximum: int) -> str:
@@ -68,6 +74,7 @@ class Bridge:
         self.started = 0.0
         self.measured_offset = 0
         self.cancel_requested = False
+        self.error = "-"
         self.lock = threading.Lock()
 
     def _version(self) -> str:
@@ -101,28 +108,40 @@ class Bridge:
             f"CWF1 INFO {PROTOCOL_VERSION} {BRIDGE_VERSION} {token(self.crunch_version, 31)}",
         )
 
-    def _measure(self) -> None:
+    def _measure(self, require_file: bool = False) -> str | None:
         path = self.output_path
-        if not path or not path.is_file():
-            return
-        size = path.stat().st_size
-        if size < self.measured_offset:
-            self.measured_offset = 0
-            self.lines = 0
-        with path.open("rb") as source:
-            source.seek(self.measured_offset)
-            while True:
-                block = source.read(65536)
-                if not block:
-                    break
-                self.lines += block.count(b"\n")
-                self.measured_offset += len(block)
-        self.bytes = size
+        if not path:
+            return None
+        try:
+            if not path.is_file():
+                return "OUTPUT_MISSING" if require_file else None
+            size = path.stat().st_size
+            if size < self.measured_offset:
+                self.measured_offset = 0
+                self.lines = 0
+            with path.open("rb") as source:
+                source.seek(self.measured_offset)
+                while True:
+                    block = source.read(65536)
+                    if not block:
+                        break
+                    self.lines += block.count(b"\n")
+                    self.measured_offset += len(block)
+            self.bytes = size
+            return None
+        except OSError as error:
+            return os_error_token("MEASURE", error)
 
     def status(self, uart: serial.Serial) -> None:
+        process_to_stop: subprocess.Popen[bytes] | None = None
         with self.lock:
             if self.state in ("STARTING", "RUNNING", "STOPPING"):
-                self._measure()
+                measure_error = self._measure()
+                if measure_error:
+                    self.error = measure_error
+                    self.state = "ERROR"
+                    self.exit_code = -1
+                    process_to_stop = self.process
                 self.elapsed_ms = max(0, int((time.monotonic() - self.started) * 1000))
             values = (
                 self.state,
@@ -132,11 +151,16 @@ class Bridge:
                 self.exit_code,
                 self.output_name,
             )
+            error_text = self.error if self.state == "ERROR" else "-"
+        if process_to_stop and process_to_stop.poll() is None:
+            process_to_stop.terminate()
         self.write(
             uart,
             f"CWF1 STATUS {token(values[0], 15)} {values[1]} {values[2]} "
             f"{values[3]} {values[4]} {token(values[5], 63)}",
         )
+        if error_text != "-":
+            self.write(uart, f"CWF1 ERROR {token(error_text, 63)}")
 
     def busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
@@ -183,30 +207,45 @@ class Bridge:
 
     def generation_worker(self, command: list[str], output: Path) -> None:
         try:
+            with tempfile.TemporaryFile() as error_output:
+                with self.lock:
+                    if self.cancel_requested:
+                        self.state = "CANCELLED"
+                        return
+                    self.process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=error_output,
+                    )
+                    process = self.process
+                    self.state = "RUNNING"
+                return_code = process.wait()
+                error_output.seek(0, 2)
+                error_size = error_output.tell()
+                error_output.seek(max(0, error_size - 256))
+                diagnostic = error_output.read().decode("utf-8", "replace").strip()
             with self.lock:
-                if self.cancel_requested:
-                    self.state = "CANCELLED"
-                    return
-                self.process = subprocess.Popen(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                process = self.process
-                self.state = "RUNNING"
-            return_code = process.wait()
-            with self.lock:
-                self._measure()
+                measure_error = self._measure(require_file=True)
                 self.elapsed_ms = max(0, int((time.monotonic() - self.started) * 1000))
                 self.exit_code = return_code
                 self.process = None
-                self.state = "CANCELLED" if self.cancel_requested else "DONE" if return_code == 0 else "ERROR"
-        except OSError:
+                if self.cancel_requested:
+                    self.state = "CANCELLED"
+                elif return_code == 0 and not measure_error:
+                    self.state = "DONE"
+                else:
+                    self.state = "ERROR"
+                    if return_code != 0:
+                        self.error = token(diagnostic or f"CRUNCH_EXIT_{return_code}", 63)
+                    else:
+                        self.error = measure_error or "OUTPUT_MEASUREMENT_FAILED"
+        except OSError as error:
             with self.lock:
                 self.process = None
                 self.state = "ERROR"
                 self.exit_code = -1
+                self.error = os_error_token("PROCESS", error)
 
     def start(self, uart: serial.Serial, fields: list[str]) -> None:
         with self.lock:
@@ -221,12 +260,22 @@ class Bridge:
             except (ValueError, OverflowError):
                 self.write(uart, "CWF1 ERROR INVALID_CONFIGURATION")
                 return
-            self.output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                self.write(uart, f"CWF1 ERROR {token('OUTPUT_PATH_' + str(error), 63)}")
+                return
+            try:
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                self.state = "ERROR"
+                self.error = os_error_token("OUTPUT_DIRECTORY", error)
+                self.write(uart, f"CWF1 ERROR {self.error}")
+                return
             self.lines = self.bytes = self.elapsed_ms = self.measured_offset = 0
             self.exit_code = 0
             self.output_path = output
             self.output_name = output.name
             self.cancel_requested = False
+            self.error = "-"
             self.started = time.monotonic()
             self.state = "STARTING"
             self.worker = threading.Thread(
@@ -269,9 +318,15 @@ class Bridge:
             self.write(uart, "CWF1 ERROR INVALID_COMMAND")
 
     def run(self) -> None:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         try:
             with serial.Serial(self.port, self.baud, timeout=0.5, write_timeout=2) as uart:
+                try:
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                except OSError as error:
+                    with self.lock:
+                        self.state = "ERROR"
+                        self.error = os_error_token("OUTPUT_DIRECTORY", error)
+                    self.write(uart, f"CWF1 ERROR {self.error}")
                 while True:
                     raw = uart.readline(MAX_LINE)
                     if not raw:
@@ -312,4 +367,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -11,12 +11,12 @@
 | Prefix/suffix text | Implemented | Fixed text at either side of active pattern markers |
 | Exact line calculation | Implemented | Checked unsigned 64-bit arithmetic |
 | Exact byte calculation | Implemented | Includes the newline written after every word |
-| `-o` output | Implemented | User filename and absolute `/ext` directory |
+| `-o` output | Implemented | User filename and slash-free folder name beneath `/ext` |
 | Existing-file protection | Implemented | Separate overwrite confirmation before truncation |
-| Output streaming | Implemented | One generated line is written at a time |
-| Cancellation | Implemented | Current write completes, file closes, partial totals shown |
+| Output streaming | Implemented | Bounded 1 KiB buffering; complete wordlist is never held in RAM |
+| Cancellation | Implemented | Temporary output is discarded and an existing wordlist is preserved |
 | Progress | Implemented | Actual lines, bytes, percentage, elapsed time, and measured entries/s |
-| Disk-full/write handling | Implemented | Short write or sync failure becomes a closed write-error result |
+| Disk-full/write handling | Implemented | Capacity is checked first; short write or sync failure cannot replace valid output |
 | Raspberry Pi/Linux mode | Implemented | Genuine upstream executable; Flipper controls it over CWF1 UART |
 | External measured status | Implemented | Real output lines, bytes, elapsed time, filename, exit state, and version |
 | External collision handling | Implemented | Selects a new numbered filename; never silently overwrites |

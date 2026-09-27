@@ -73,6 +73,17 @@ if os.name == "nt":
         check=True,
         env=environment,
     )
+    cli_executable = OUT / "core_cli.exe"
+    subprocess.run(
+        [
+            str(compiler), "/nologo", "/W4", "/WX", "/std:c11", f"/I{ROOT}",
+            str(ROOT / "crunch_core.c"), f'/Tc{ROOT / "tests" / "core_cli.c.host"}',
+            f"/Fe:{cli_executable}",
+        ],
+        cwd=OUT,
+        check=True,
+        env=environment,
+    )
 else:
     compiler = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
     if not compiler:
@@ -86,5 +97,34 @@ else:
         cwd=ROOT,
         check=True,
     )
+    cli_executable = OUT / "core_cli"
+    subprocess.run(
+        [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", f"-I{ROOT}",
+         str(ROOT / "crunch_core.c"), "-x", "c", str(ROOT / "tests" / "core_cli.c.host"),
+         "-o", str(cli_executable)],
+        cwd=ROOT,
+        check=True,
+    )
 
 subprocess.run([str(executable)], cwd=ROOT, check=True)
+
+upstream = shutil.which("crunch")
+if upstream:
+    differential_cases = (
+        (["1", "2", "ab", "-", "-"], ["1", "2", "ab"]),
+        (["3", "3", "ab", "@%x", "-"], ["3", "3", "ab", "+", "+", "+", "-t", "@%x"]),
+        (["5", "5", "ab", "pre@@", "-"], ["5", "5", "ab", "+", "+", "+", "-t", "pre@@"]),
+    )
+    for port_args, upstream_args in differential_cases:
+        port_output = subprocess.run(
+            [str(cli_executable), *port_args], check=True, stdout=subprocess.PIPE
+        ).stdout
+        upstream_output = subprocess.run(
+            [upstream, *upstream_args], check=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        ).stdout
+        if port_output != upstream_output:
+            raise SystemExit(f"upstream differential mismatch: {' '.join(upstream_args)}")
+    print(f"Upstream Crunch differential tests passed using {upstream}.")
+else:
+    print("Upstream Crunch differential tests SKIPPED: install genuine Crunch on PATH.")

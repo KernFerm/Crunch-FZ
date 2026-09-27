@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1 — 2026-09-27
+
+- Made native output transactional with `.partial` and recovery `.backup` files.
+- Preserved existing wordlists across cancellation, disk-full, write, sync, and promotion failures.
+- Added microSD free-space validation to preflight.
+- Added a bounded 1 KiB native write buffer.
+- Replaced the absolute-path editor with a slash-free folder name beneath `/ext`.
+- Initialized UART before starting the external receive worker.
+- Made companion filesystem failures bounded protocol errors and surfaced genuine Crunch diagnostics.
+- Added direct upstream differential tests using an installed genuine Crunch executable.
+
 ## 1.0.0 — 2026-09-26
 
 - Ported genuine Crunch 3.6 character ordering and odometer generation.

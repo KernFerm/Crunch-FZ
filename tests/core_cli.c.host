@@ -1,0 +1,35 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#include "crunch_core.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static bool stdout_emit(void* context, const uint8_t* data, size_t length) {
+    (void)context;
+    return fwrite(data, 1U, length, stdout) == length;
+}
+
+int main(int argc, char** argv) {
+    if(argc != 6) {
+        fprintf(stderr, "usage: core_cli MIN MAX CHARSET PATTERN|- LITERAL|-\n");
+        return 2;
+    }
+    CrunchConfig config;
+    memset(&config, 0, sizeof(config));
+    config.charset_mode = CrunchCharsetCustom;
+    config.minimum_length = (uint8_t)strtoul(argv[1], NULL, 10);
+    config.maximum_length = (uint8_t)strtoul(argv[2], NULL, 10);
+    if(strlen(argv[3]) > CRUNCH_MAX_CHARSET || strlen(argv[4]) > CRUNCH_MAX_WORD ||
+       strlen(argv[5]) > CRUNCH_MAX_WORD) {
+        return 2;
+    }
+    memcpy(config.custom_charset, argv[3], strlen(argv[3]) + 1U);
+    if(strcmp(argv[4], "-")) memcpy(config.pattern, argv[4], strlen(argv[4]) + 1U);
+    if(strcmp(argv[5], "-")) memcpy(config.literal_mask, argv[5], strlen(argv[5]) + 1U);
+
+    CrunchPlan plan;
+    if(crunch_plan_build(&config, &plan) != CrunchOk) return 3;
+    CrunchGenerateResult result = crunch_generate(&plan, stdout_emit, NULL, NULL, NULL);
+    return result.status == CrunchGenerateComplete ? 0 : 4;
+}

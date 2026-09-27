@@ -6,11 +6,11 @@ Every count multiplication and sum is checked against `UINT64_MAX`. Pattern prod
 
 ## Input validation
 
-The core rejects empty/oversized sets, invalid length ranges, pattern-length mismatches, literal masks that do not match the pattern, non-printable bytes, and unrepresentable totals. The UI restricts output to absolute `/ext` paths, rejects traversal and repeated separators, and rejects FAT-invalid filename characters.
+The core rejects empty/oversized sets, invalid length ranges, pattern-length mismatches, literal masks that do not match the pattern, non-printable bytes, and unrepresentable totals. The UI accepts a single folder name beneath `/ext`, rejects separators and traversal, and rejects FAT-invalid filename characters.
 
 ## Storage
 
-The application asks for confirmation before replacing an existing file. Output is opened only after successful preflight. Every line write must return its exact requested length. Short writes, synchronization failures, missing SD storage, and allocation/open failures produce explicit failure states. Cancellation and write failure close the file; the completion page identifies partial output instead of claiming completion.
+The application asks for confirmation before replacing an existing file and verifies that the calculated output fits in current microSD free space. Generation uses a bounded buffer and a transactional `.partial` file. Only successfully flushed and synchronized output is promoted; the prior file is held as `.backup` during replacement. Cancellation, short writes, synchronization failures, missing SD storage, and allocation/open failures discard temporary output and preserve the previous wordlist.
 
 The output directory and filename are passed directly to the storage API. They are never inserted into a shell command. The application does not execute generated words or parse generated content.
 
@@ -22,7 +22,7 @@ The UART is acquired through the official USART control API. The firmware expans
 
 ## Memory and lifecycle
 
-Generation uses fixed-size stack state and streams one line at a time. The complete output is never accumulated. Worker, file, mutex, GUI, and storage resources have explicit close/free paths. Back requests cancellation while a worker owns the file; teardown joins the worker before releasing application state.
+Generation uses fixed-size state and a heap-checked 1 KiB write buffer. The complete output is never accumulated. Worker, file, mutex, GUI, and storage resources have explicit close/free paths. Back requests cancellation while a worker owns the file; teardown joins the worker before releasing application state.
 
 ## Intended use
 

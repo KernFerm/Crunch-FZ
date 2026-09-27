@@ -17,10 +17,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CRUNCH_FZ_VERSION "1.0.0"
+#define CRUNCH_FZ_VERSION "1.0.1"
 #define CRUNCH_OUTPUT_DIR_MAX 127U
 #define CRUNCH_OUTPUT_NAME_MAX 63U
 #define CRUNCH_OUTPUT_PATH_MAX 255U
+#define CRUNCH_IO_BUFFER_SIZE 1024U
+#define CRUNCH_TRANSACTION_SUFFIX_MAX 8U
 
 typedef enum {
     CrunchViewMain,
@@ -145,15 +147,13 @@ static bool crunch_filename_valid(const char* filename) {
 
 static bool crunch_directory_valid(const char* directory) {
     size_t length = crunch_bounded_length(directory, CRUNCH_OUTPUT_DIR_MAX + 1U);
-    if(length < 4U || length > CRUNCH_OUTPUT_DIR_MAX || strncmp(directory, "/ext", 4U) ||
-       (directory[4] != '\0' && directory[4] != '/') || strstr(directory, "..") ||
-       strstr(directory, "//") || directory[length - 1U] == '/') {
+    if(!length || length > CRUNCH_OUTPUT_DIR_MAX || !strcmp(directory, ".") ||
+       !strcmp(directory, "..") || strstr(directory, "..")) {
         return false;
     }
     for(size_t index = 0; index < length; index++) {
         unsigned char character = (unsigned char)directory[index];
-        if(character < 0x20U || character > 0x7EU || character == '\\' ||
-           strchr(":*?\"<>|", character)) {
+        if(character < 0x20U || character > 0x7EU || strchr("/\\:*?\"<>|", character)) {
             return false;
         }
     }
@@ -168,7 +168,7 @@ static bool crunch_build_output_path(CrunchApp* app) {
     int written = snprintf(
         app->output_path,
         sizeof(app->output_path),
-        "%s/%s",
+        "/ext/%s/%s",
         app->output_directory,
         app->output_filename);
     return written > 0 && (size_t)written < sizeof(app->output_path);
@@ -277,24 +277,46 @@ static unsigned crunch_percent(uint64_t completed, uint64_t total) {
     return 0U;
 }
 
-static bool crunch_emit(void* context, const uint8_t* data, size_t length) {
-    File* file = context;
-    return storage_file_write(file, data, length) == length;
-}
-
 static bool crunch_cancelled(void* context) {
     CrunchApp* app = context;
     return app->cancel;
 }
 
 typedef struct {
-    CrunchApp* app;
     File* file;
+    uint8_t data[CRUNCH_IO_BUFFER_SIZE];
+    size_t used;
+} CrunchBufferedWriter;
+
+static bool crunch_writer_flush(CrunchBufferedWriter* writer) {
+    if(!writer->used) return true;
+    if(storage_file_write(writer->file, writer->data, writer->used) != writer->used) return false;
+    writer->used = 0U;
+    return true;
+}
+
+static bool crunch_writer_append(CrunchBufferedWriter* writer, const uint8_t* data, size_t length) {
+    while(length) {
+        size_t available = sizeof(writer->data) - writer->used;
+        if(!available && !crunch_writer_flush(writer)) return false;
+        available = sizeof(writer->data) - writer->used;
+        size_t chunk = length < available ? length : available;
+        memcpy(writer->data + writer->used, data, chunk);
+        writer->used += chunk;
+        data += chunk;
+        length -= chunk;
+    }
+    return true;
+}
+
+typedef struct {
+    CrunchApp* app;
+    CrunchBufferedWriter* writer;
 } CrunchWorkerContext;
 
 static bool crunch_worker_emit(void* context, const uint8_t* data, size_t length) {
     CrunchWorkerContext* worker = context;
-    return crunch_emit(worker->file, data, length);
+    return crunch_writer_append(worker->writer, data, length);
 }
 
 static bool crunch_worker_cancelled(void* context) {
@@ -318,27 +340,72 @@ static int32_t crunch_worker(void* context) {
     app->run_status = CrunchRunIdle;
     memset(&app->result, 0, sizeof(app->result));
 
-    if(storage_simply_mkdir(app->storage, app->output_directory)) {
+    char directory[CRUNCH_OUTPUT_PATH_MAX + 1U];
+    char temporary[CRUNCH_OUTPUT_PATH_MAX + CRUNCH_TRANSACTION_SUFFIX_MAX + 1U];
+    char backup[CRUNCH_OUTPUT_PATH_MAX + CRUNCH_TRANSACTION_SUFFIX_MAX + 1U];
+    snprintf(directory, sizeof(directory), "/ext/%s", app->output_directory);
+    snprintf(temporary, sizeof(temporary), "%s.partial", app->output_path);
+    snprintf(backup, sizeof(backup), "%s.backup", app->output_path);
+
+    if(storage_simply_mkdir(app->storage, directory)) {
+        if(storage_file_exists(app->storage, backup)) {
+            if(!storage_file_exists(app->storage, app->output_path)) {
+                if(storage_common_rename(app->storage, backup, app->output_path) != FSE_OK) {
+                    app->run_status = CrunchRunWriteError;
+                    goto worker_done;
+                }
+            } else if(storage_common_remove(app->storage, backup) != FSE_OK) {
+                app->run_status = CrunchRunWriteError;
+                goto worker_done;
+            }
+        }
+        if(storage_file_exists(app->storage, temporary) &&
+           storage_common_remove(app->storage, temporary) != FSE_OK) {
+            app->run_status = CrunchRunWriteError;
+            goto worker_done;
+        }
         File* file = storage_file_alloc(app->storage);
         if(file) {
             app->run_status = CrunchRunOpenError;
-            if(storage_file_open(file, app->output_path, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
-                CrunchWorkerContext worker_context = {.app = app, .file = file};
-                app->result = crunch_generate(
-                    &app->plan,
-                    crunch_worker_emit,
-                    crunch_worker_cancelled,
-                    crunch_worker_progress,
-                    &worker_context);
-                if(app->result.status == CrunchGenerateComplete)
-                    app->run_status = CrunchRunComplete;
-                else if(app->result.status == CrunchGenerateCancelled)
-                    app->run_status = CrunchRunCancelled;
-                else
-                    app->run_status = CrunchRunWriteError;
+            if(storage_file_open(file, temporary, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+                CrunchBufferedWriter* writer = calloc(1U, sizeof(CrunchBufferedWriter));
+                if(writer) {
+                    writer->file = file;
+                    CrunchWorkerContext worker_context = {.app = app, .writer = writer};
+                    app->result = crunch_generate(
+                        &app->plan,
+                        crunch_worker_emit,
+                        crunch_worker_cancelled,
+                        crunch_worker_progress,
+                        &worker_context);
+                    if(app->result.status == CrunchGenerateComplete && crunch_writer_flush(writer))
+                        app->run_status = CrunchRunComplete;
+                    else if(app->result.status == CrunchGenerateCancelled)
+                        app->run_status = CrunchRunCancelled;
+                    else
+                        app->run_status = CrunchRunWriteError;
+                    free(writer);
+                }
                 if(!storage_file_sync(file) && app->run_status == CrunchRunComplete)
                     app->run_status = CrunchRunWriteError;
                 storage_file_close(file);
+
+                if(app->run_status == CrunchRunComplete) {
+                    bool had_output = storage_file_exists(app->storage, app->output_path);
+                    if(had_output &&
+                       storage_common_rename(app->storage, app->output_path, backup) != FSE_OK) {
+                        app->run_status = CrunchRunWriteError;
+                    } else if(storage_common_rename(app->storage, temporary, app->output_path) !=
+                              FSE_OK) {
+                        if(had_output)
+                            storage_common_rename(app->storage, backup, app->output_path);
+                        app->run_status = CrunchRunWriteError;
+                    } else if(had_output) {
+                        storage_common_remove(app->storage, backup);
+                    }
+                }
+                if(app->run_status != CrunchRunComplete)
+                    storage_common_remove(app->storage, temporary);
             }
             storage_file_free(file);
         } else {
@@ -348,6 +415,7 @@ static int32_t crunch_worker(void* context) {
         app->run_status = CrunchRunDirectoryError;
     }
 
+worker_done:
     app->end_tick = furi_get_tick();
     app->heap_after = memmgr_get_free_heap();
     app->heap_minimum = memmgr_get_minimum_free_heap();
@@ -366,13 +434,13 @@ static void crunch_show_completion(CrunchApp* app) {
         status = "Exact preflight total written.";
     } else if(app->run_status == CrunchRunCancelled) {
         title = "Generation cancelled";
-        status = "Partial output was closed safely.";
+        status = "Temporary output discarded; existing output preserved.";
     } else if(app->run_status == CrunchRunDirectoryError) {
         status = "Could not create the output directory.";
     } else if(app->run_status == CrunchRunOpenError) {
         status = "Could not open the output file.";
     } else if(app->run_status == CrunchRunWriteError) {
-        status = "SD write failed or storage is full. Partial output was closed.";
+        status = "Write failed; temporary output discarded and existing output preserved.";
     }
     char body[512];
     snprintf(
@@ -457,20 +525,42 @@ static void crunch_preflight(CrunchApp* app) {
         crunch_show_text(
             app,
             "Invalid output",
-            "Use a printable filename without / \\ : * ? \" < > | and an absolute /ext directory without ..",
+            "Use printable names without / \\ : * ? \" < > |. The folder is created under /ext.",
             CrunchViewMain);
+        return;
+    }
+    uint64_t total_space = 0U;
+    uint64_t free_space = 0U;
+    if(storage_common_fs_info(app->storage, "/ext", &total_space, &free_space) != FSE_OK) {
+        crunch_show_text(
+            app,
+            "Storage unavailable",
+            "Could not read microSD capacity. Check that the card is mounted and try again.",
+            CrunchViewMain);
+        return;
+    }
+    if(app->plan.total_bytes > free_space) {
+        char message[192];
+        snprintf(
+            message,
+            sizeof(message),
+            "Required: %llu bytes\nAvailable: %llu bytes\n\nGeneration was not started.",
+            (unsigned long long)app->plan.total_bytes,
+            (unsigned long long)free_space);
+        crunch_show_text(app, "Not enough space", message, CrunchViewMain);
         return;
     }
     widget_reset(app->widget);
     furi_string_printf(
         app->text,
-        "\e#Preflight\nCharset: %s\nMode: %s\nLength: %u..%u\nLines: %llu\nBytes: %llu\nOutput: %s%s",
+        "\e#Preflight\nCharset: %s\nMode: %s\nLength: %u..%u\nLines: %llu\nBytes: %llu\nSD free: %llu\nOutput: %s%s",
         crunch_charset_name(app->config.charset_mode),
         app->plan.pattern_mode ? "pattern" : "range",
         app->config.minimum_length,
         app->config.maximum_length,
         (unsigned long long)app->plan.total_lines,
         (unsigned long long)app->plan.total_bytes,
+        (unsigned long long)free_space,
         app->output_path,
         storage_file_exists(app->storage, app->output_path) ? "\nExisting file: overwrite confirmation required." : "");
     widget_add_text_scroll_element(app->widget, 0, 0, 128, 51, furi_string_get_cstr(app->text));
@@ -509,7 +599,7 @@ static void crunch_open_input(CrunchApp* app, CrunchInputPurpose purpose) {
     } else {
         buffer = app->output_directory;
         size = sizeof(app->output_directory);
-        header = "Output directory under /ext";
+        header = "Folder name under /ext";
     }
     text_input_reset(app->input);
     text_input_set_header_text(app->input, header);
@@ -544,8 +634,9 @@ static void crunch_main_selected(void* context, uint32_t index) {
             "About Crunch FZ",
             "Version " CRUNCH_FZ_VERSION
             "\n\nStreams genuine Crunch-style combinations directly to microSD. No complete wordlist is held in RAM."
-            "\n\nPatterns: @ selected/lower set, , uppercase, % numbers, ^ symbols. Fixed text creates prefixes and suffixes. A same-length literal mask makes matching markers literal."
-            "\n\nPreflight uses checked exact line and byte counts. Progress and speed are measured from actual writes."
+             "\n\nPatterns: @ selected/lower set, , uppercase, % numbers, ^ symbols. Fixed text creates prefixes and suffixes. A same-length literal mask makes matching markers literal."
+             "\n\nPreflight uses checked exact line and byte counts and verifies microSD free space. Buffered transactional output preserves an existing wordlist unless the replacement fully succeeds."
+             "\n\nProgress and speed come from the real generation run."
             "\n\nExternal Crunch runs the genuine upstream executable on a Raspberry Pi or Linux computer. The Flipper sends the validated configuration over 3.3V UART and displays measured Pi output."
             "\n\nGNU GPL v2 only. Use only for authorized work.",
             CrunchViewMain);
@@ -673,7 +764,7 @@ static CrunchApp* crunch_app_alloc(void) {
     app->config.maximum_length = 4U;
     memcpy(app->config.custom_charset, "abc123", 7U);
     memcpy(app->output_filename, "wordlist.txt", 13U);
-    memcpy(app->output_directory, "/ext/crunch_fz", 15U);
+    memcpy(app->output_directory, "crunch_fz", 10U);
     app->external_baud = 115200U;
 
     submenu_set_header(app->main_menu, "Crunch FZ v" CRUNCH_FZ_VERSION);
