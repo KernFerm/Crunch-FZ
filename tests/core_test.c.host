@@ -1,0 +1,223 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#include "crunch_core.h"
+#include "crunch_external_protocol.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#define CHECK(condition)                                                                        \
+    do {                                                                                        \
+        if(!(condition)) {                                                                      \
+            fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #condition);   \
+            return false;                                                                       \
+        }                                                                                       \
+    } while(0)
+
+typedef struct {
+    char output[8192];
+    size_t length;
+    uint64_t writes;
+    uint64_t cancel_after;
+    uint64_t fail_on_write;
+    uint64_t progress_lines;
+    uint64_t progress_bytes;
+} TestSink;
+
+static CrunchConfig base_config(void) {
+    CrunchConfig config;
+    memset(&config, 0, sizeof(config));
+    config.charset_mode = CrunchCharsetCustom;
+    config.minimum_length = 1U;
+    config.maximum_length = 1U;
+    memcpy(config.custom_charset, "ab", 3U);
+    return config;
+}
+
+static bool sink_emit(void* context, const uint8_t* data, size_t length) {
+    TestSink* sink = context;
+    sink->writes++;
+    if(sink->fail_on_write && sink->writes == sink->fail_on_write) return false;
+    if(length > sizeof(sink->output) - sink->length - 1U) return false;
+    memcpy(sink->output + sink->length, data, length);
+    sink->length += length;
+    sink->output[sink->length] = '\0';
+    return true;
+}
+
+static bool sink_cancel(void* context) {
+    TestSink* sink = context;
+    return sink->cancel_after && sink->writes >= sink->cancel_after;
+}
+
+static void sink_progress(void* context, uint64_t lines, uint64_t bytes) {
+    TestSink* sink = context;
+    sink->progress_lines = lines;
+    sink->progress_bytes = bytes;
+}
+
+static bool generate_and_match(CrunchConfig* config, const char* expected) {
+    CrunchPlan plan;
+    CHECK(crunch_plan_build(config, &plan) == CrunchOk);
+    CHECK(plan.total_bytes == strlen(expected));
+    TestSink sink = {0};
+    CrunchGenerateResult result =
+        crunch_generate(&plan, sink_emit, sink_cancel, sink_progress, &sink);
+    CHECK(result.status == CrunchGenerateComplete);
+    CHECK(result.generated_lines == plan.total_lines);
+    CHECK(result.output_bytes == plan.total_bytes);
+    CHECK(!strcmp(sink.output, expected));
+    CHECK(sink.progress_lines == result.generated_lines);
+    CHECK(sink.progress_bytes == result.output_bytes);
+    return true;
+}
+
+static bool test_upstream_range_order(void) {
+    CrunchConfig config = base_config();
+    config.maximum_length = 2U;
+    /* Genuine Crunch: crunch 1 2 ab */
+    return generate_and_match(&config, "a\nb\naa\nab\nba\nbb\n");
+}
+
+static bool test_one_character_set(void) {
+    CrunchConfig config = base_config();
+    memcpy(config.custom_charset, "x", 2U);
+    config.maximum_length = 3U;
+    return generate_and_match(&config, "x\nxx\nxxx\n");
+}
+
+static bool test_upstream_pattern_order(void) {
+    CrunchConfig config = base_config();
+    config.minimum_length = config.maximum_length = 3U;
+    memcpy(config.pattern, "@%x", 4U);
+    return generate_and_match(
+        &config,
+        "a0x\na1x\na2x\na3x\na4x\na5x\na6x\na7x\na8x\na9x\n"
+        "b0x\nb1x\nb2x\nb3x\nb4x\nb5x\nb6x\nb7x\nb8x\nb9x\n");
+}
+
+static bool test_literal_marker_and_prefix(void) {
+    CrunchConfig config = base_config();
+    config.minimum_length = config.maximum_length = 3U;
+    memcpy(config.pattern, "@^%", 4U);
+    memcpy(config.literal_mask, "-^-", 4U);
+    CHECK(generate_and_match(
+        &config,
+        "a^0\na^1\na^2\na^3\na^4\na^5\na^6\na^7\na^8\na^9\n"
+        "b^0\nb^1\nb^2\nb^3\nb^4\nb^5\nb^6\nb^7\nb^8\nb^9\n"));
+
+    memset(config.literal_mask, 0, sizeof(config.literal_mask));
+    config.minimum_length = config.maximum_length = 5U;
+    memcpy(config.pattern, "pre@@", 6U);
+    return generate_and_match(&config, "preaa\npreab\npreba\nprebb\n");
+}
+
+static bool test_counts_and_duplicate_behavior(void) {
+    CrunchConfig config = base_config();
+    config.charset_mode = CrunchCharsetNumeric;
+    config.minimum_length = 1U;
+    config.maximum_length = 2U;
+    CrunchPlan plan;
+    CHECK(crunch_plan_build(&config, &plan) == CrunchOk);
+    CHECK(plan.total_lines == 110U);
+    CHECK(plan.total_bytes == 320U);
+
+    config.charset_mode = CrunchCharsetCustom;
+    config.minimum_length = config.maximum_length = 1U;
+    memcpy(config.custom_charset, "aa", 3U);
+    return generate_and_match(&config, "a\na\n");
+}
+
+static bool test_validation_and_overflow(void) {
+    CrunchConfig config = base_config();
+    CrunchPlan plan;
+    config.custom_charset[0] = '\0';
+    CHECK(crunch_plan_build(&config, &plan) == CrunchErrorCharset);
+
+    config = base_config();
+    config.minimum_length = config.maximum_length = 2U;
+    memcpy(config.pattern, "@@@", 4U);
+    CHECK(crunch_plan_build(&config, &plan) == CrunchErrorPattern);
+
+    config.minimum_length = config.maximum_length = 3U;
+    memcpy(config.literal_mask, "--", 3U);
+    CHECK(crunch_plan_build(&config, &plan) == CrunchErrorLiteralMask);
+
+    memset(&config, 0, sizeof(config));
+    config.charset_mode = CrunchCharsetAlphanumeric;
+    config.minimum_length = 1U;
+    config.maximum_length = CRUNCH_MAX_WORD;
+    CHECK(crunch_plan_build(&config, &plan) == CrunchErrorOverflow);
+    return true;
+}
+
+static bool test_cancellation_and_write_error(void) {
+    CrunchConfig config = base_config();
+    config.maximum_length = 3U;
+    CrunchPlan plan;
+    CHECK(crunch_plan_build(&config, &plan) == CrunchOk);
+
+    TestSink cancelled = {.cancel_after = 3U};
+    CrunchGenerateResult result =
+        crunch_generate(&plan, sink_emit, sink_cancel, sink_progress, &cancelled);
+    CHECK(result.status == CrunchGenerateCancelled);
+    CHECK(result.generated_lines == 3U);
+    CHECK(!strcmp(cancelled.output, "a\nb\naa\n"));
+
+    TestSink failed = {.fail_on_write = 2U};
+    result = crunch_generate(&plan, sink_emit, sink_cancel, sink_progress, &failed);
+    CHECK(result.status == CrunchGenerateWriteError);
+    CHECK(result.generated_lines == 1U);
+    CHECK(result.output_bytes == 2U);
+    CHECK(!strcmp(failed.output, "a\n"));
+    return true;
+}
+
+typedef struct {
+    uint32_t count;
+    CrunchExternalMessage message;
+} ProtocolSink;
+
+static void protocol_receive(const CrunchExternalMessage* message, void* context) {
+    ProtocolSink* sink = context;
+    sink->count++;
+    sink->message = *message;
+}
+
+static bool test_external_protocol(void) {
+    CrunchExternalMessage message;
+    CHECK(crunch_external_parse_line("CWF1 INFO 1 1.0.0 3.6", &message));
+    CHECK(message.type == CrunchExternalMessageInfo);
+    CHECK(message.protocol_version == 1U);
+    CHECK(!strcmp(message.crunch_version, "3.6"));
+    CHECK(crunch_external_parse_line(
+        "CWF1 STATUS RUNNING 123 456 789 0 wordlist.txt", &message));
+    CHECK(message.type == CrunchExternalMessageStatus);
+    CHECK(message.lines == 123U && message.bytes == 456U && message.elapsed_ms == 789U);
+    CHECK(!crunch_external_parse_line(
+        "CWF1 STATUS RUNNING 18446744073709551616 1 1 0 x", &message));
+    CHECK(!crunch_external_parse_line("CWF1 INFO 2", &message));
+
+    CrunchExternalDecoder decoder;
+    crunch_external_decoder_reset(&decoder);
+    ProtocolSink sink = {0};
+    const uint8_t first[] = "CWF1 INFO 1 1.";
+    const uint8_t second[] = "0.0 3.6\r\n";
+    crunch_external_decoder_feed(&decoder, first, sizeof(first) - 1U, protocol_receive, &sink);
+    CHECK(sink.count == 0U);
+    crunch_external_decoder_feed(&decoder, second, sizeof(second) - 1U, protocol_receive, &sink);
+    CHECK(sink.count == 1U && sink.message.type == CrunchExternalMessageInfo);
+    return true;
+}
+
+int main(void) {
+    CHECK(test_upstream_range_order());
+    CHECK(test_one_character_set());
+    CHECK(test_upstream_pattern_order());
+    CHECK(test_literal_marker_and_prefix());
+    CHECK(test_counts_and_duplicate_behavior());
+    CHECK(test_validation_and_overflow());
+    CHECK(test_cancellation_and_write_error());
+    CHECK(test_external_protocol());
+    puts("All Crunch-FZ core tests passed.");
+    return 0;
+}

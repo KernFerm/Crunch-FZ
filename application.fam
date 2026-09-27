@@ -1,0 +1,13 @@
+App(
+    appid="crunch_fz",
+    name="Crunch FZ",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="crunch_fz_app",
+    sources=["*.c"],
+    requires=["gui", "storage"],
+    stack_size=4096,
+    fap_category="Tools",
+    fap_description="Native and external genuine Crunch generation",
+    fap_author="Crunch contributors; Flipper port contributors",
+    fap_version="1.0.0",
+)

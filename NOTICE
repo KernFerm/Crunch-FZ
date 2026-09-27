@@ -1,0 +1,17 @@
+Crunch FZ
+=========
+
+Crunch FZ adapts the character-set generation, ordering, pattern, literal,
+and output-size semantics of Crunch 3.6 for bounded Flipper Zero operation.
+
+Original Crunch code and algorithms:
+
+Copyright (C) 2004 mimayin@aciiid.ath.cx
+Copyright (C) 2008-2013 bofh28@gmail.com
+
+Crunch and Crunch FZ are distributed under the GNU General Public License,
+version 2 only. See LICENSE and UPSTREAM_VERSION.md.
+
+Crunch FZ is not endorsed by the upstream Crunch maintainers or Flipper
+Devices.
+

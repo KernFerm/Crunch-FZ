@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Unit]
+Description=Crunch FZ UART bridge
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/crunch-fz/venv/bin/python /opt/crunch-fz/crunch_fz_bridge.py --serial /dev/serial0 --baud 115200
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
