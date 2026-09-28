@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CRUNCH_FZ_VERSION "1.0.1"
+#define CRUNCH_FZ_VERSION "1.0.4"
 #define CRUNCH_OUTPUT_DIR_MAX 127U
 #define CRUNCH_OUTPUT_NAME_MAX 63U
 #define CRUNCH_OUTPUT_PATH_MAX 255U

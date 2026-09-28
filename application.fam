@@ -9,5 +9,5 @@ App(
     fap_category="Tools",
     fap_description="Native and external genuine Crunch generation",
     fap_author="Crunch contributors; Flipper port contributors",
-    fap_version="1.0.1",
+    fap_version="1.0.4",
 )

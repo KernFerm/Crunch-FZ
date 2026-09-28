@@ -6,7 +6,7 @@ The companion provides Crunch-FZ's second operating mode. Genuine upstream Crunc
 
 - Raspberry Pi or another Linux computer
 - Three female-to-female jumper wires for a Pi, or a USB-to-3.3 V UART adapter for a laptop
-- Flipper Zero with Crunch-FZ 1.0.1
+- Flipper Zero with Crunch-FZ 1.0.4
 
 Both sides must use 3.3 V UART. Do not connect a 5 V UART signal and do not connect either device's power pin to the other. For a Raspberry Pi 40-pin header, connect:
 

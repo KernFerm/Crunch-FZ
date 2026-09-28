@@ -15,7 +15,7 @@ from pathlib import Path
 
 import serial
 
-BRIDGE_VERSION = "1.0.1"
+BRIDGE_VERSION = "1.0.4"
 PROTOCOL_VERSION = 1
 MAX_LINE = 512
 DATA_ROOT = Path("/var/lib/crunch-fz")

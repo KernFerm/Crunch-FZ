@@ -1,8 +1,8 @@
 # Crunch FZ
 
-Crunch FZ generates real newline-delimited wordlists and streams them directly to a Flipper Zero microSD card. Version 1.0.1 includes an external Linux/Raspberry Pi mode: genuine upstream Crunch runs on the Linux computer, while the Flipper is its 3.3 V UART controller and measured status display. End users can choose native Flipper generation or genuine external Crunch generation.
+Crunch FZ generates real newline-delimited wordlists and streams them directly to a Flipper Zero microSD card. Version 1.0.4 includes an external Linux/Raspberry Pi mode: genuine upstream Crunch runs on the Linux computer, while the Flipper is its 3.3 V UART controller and measured status display. End users can choose native Flipper generation or genuine external Crunch generation.
 
-Current release: **v1.0.1**.
+Current release: **v1.0.4**.
 
 ## Install the FAP
 

@@ -46,7 +46,7 @@ ufbt
 
 Clean build result on 2026-09-26: APPCHK passed for target f7/API 87.1 with no unresolved symbols.
 
-Current v1.0.1 artifact: 30,460 bytes; SHA-256 `A8F0DE4021D92BC1893F04B65925997A876DE12C7C3C3FDBEFA803A9B80A4DEE`.
+Current v1.0.4 artifact: 30,460 bytes; SHA-256 `6A14F814523F3D77C85645E7DCF44F1BF8E576C0EA8EC9AEA78A19C237A9076F`.
 
 ## Physical-device acceptance
 
